@@ -71,7 +71,13 @@ listener =
 
       # Start up a new thread that will handle each successive connection.
       Thread.new(server.accept_nonblock) do |socket|
-        request = JSON.parse(socket.read.force_encoding("UTF-8"))
+        # Read the length header (4 bytes)
+        length_bytes = socket.read(4)
+        expected_length = length_bytes.unpack1("N")
+
+        # Read the content based on the expected length
+        content = socket.read(expected_length)
+        request = JSON.parse(content.force_encoding("UTF-8"))
         source = request["source"]
 
         source.each_line do |line|
@@ -136,16 +142,28 @@ listener =
           end
 
         if response
-          socket.write(JSON.fast_generate(response.force_encoding("UTF-8")))
+          content = JSON.fast_generate(response.force_encoding("UTF-8"))
+          content_bytes = content.bytesize
+          socket.write([content_bytes].pack("N"))
+          socket.write(content)
         else
-          socket.write("{ \"error\": true }")
+          content = "{ \"error\": true }"
+          content_bytes = content.bytesize
+          socket.write([content_bytes].pack("N"))
+          socket.write(content)
         end
       rescue SyntaxTree::Parser::ParseError => error
         loc = { start: { line: error.lineno, column: error.column } }
-        socket.write(JSON.fast_generate(error: error.message, loc: loc))
+        content = JSON.fast_generate(error: error.message, loc: loc)
+        content_bytes = content.bytesize
+        socket.write([content_bytes].pack("N"))
+        socket.write(content)
       rescue StandardError => error
         begin
-          socket.write(JSON.fast_generate(error: error.message))
+          content = JSON.fast_generate(error: error.message)
+          content_bytes = content.bytesize
+          socket.write([content_bytes].pack("N"))
+          socket.write(content)
         rescue Errno::EPIPE
           # Do nothing, the pipe has been closed by the parent process so we
           # don't actually care about writing to it anymore.

@@ -157,40 +157,59 @@ async function parse(parser, source, opts) {
 
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
-    let chunks = "";
+    let buffer = Buffer.alloc(0);
+    let expectedLength = null;
 
     socket.on("error", (error) => {
       reject(error);
     });
 
     socket.on("data", (data) => {
-      chunks += data.toString("utf-8");
+      buffer = Buffer.concat([buffer, data]);
+
+      // If we haven't read the length header yet
+      if (expectedLength === null && buffer.length >= 4) {
+        expectedLength = buffer.readUInt32BE(0);
+        buffer = buffer.subarray(4);
+      }
+
+      // If we have the complete message
+      if (expectedLength !== null && buffer.length >= expectedLength) {
+        const response = JSON.parse(
+          buffer.toString("utf-8", 0, expectedLength)
+        );
+
+        if (response.error) {
+          const error = new Error(response.error);
+          if (response.loc) {
+            error.loc = response.loc;
+          }
+          reject(error);
+        } else {
+          resolve(response);
+        }
+      }
     });
 
     socket.on("end", () => {
-      const response = JSON.parse(chunks);
-
-      if (response.error) {
-        const error = new Error(response.error);
-        if (response.loc) {
-          error.loc = response.loc;
-        }
-
-        reject(error);
+      if (expectedLength === null || buffer.length < expectedLength) {
+        reject(new Error("Socket closed before receiving complete response"));
       }
-
-      resolve(response);
     });
 
     socket.connect(connectionOptions, () => {
-      socket.end(
-        JSON.stringify({
-          parser,
-          source,
-          maxwidth: opts.printWidth,
-          tabwidth: opts.tabWidth
-        })
-      );
+      const content = JSON.stringify({
+        parser,
+        source,
+        maxwidth: opts.printWidth,
+        tabwidth: opts.tabWidth
+      });
+      const contentBuffer = Buffer.from(content, "utf-8");
+      const lengthBuffer = Buffer.allocUnsafe(4);
+      lengthBuffer.writeUInt32BE(contentBuffer.length, 0);
+
+      socket.write(lengthBuffer);
+      socket.end(contentBuffer);
     });
   });
 }
